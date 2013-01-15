@@ -2,12 +2,14 @@ package com.hangtime.astaxy;
 
 import com.netflix.astyanax.AstyanaxConfiguration;
 import com.netflix.astyanax.AstyanaxContext;
+import com.netflix.astyanax.CassandraOperationTracer;
 import com.netflix.astyanax.CassandraOperationType;
 import com.netflix.astyanax.Keyspace;
 import com.netflix.astyanax.Cluster;
 import com.netflix.astyanax.KeyspaceTracerFactory;
 import com.netflix.astyanax.connectionpool.ConnectionPool;
 import com.netflix.astyanax.connectionpool.ConnectionPoolConfiguration;
+import com.netflix.astyanax.connectionpool.Host;
 import com.netflix.astyanax.connectionpool.Operation;
 import com.netflix.astyanax.connectionpool.OperationResult;
 import com.netflix.astyanax.connectionpool.exceptions.ConnectionException;
@@ -17,10 +19,13 @@ import com.netflix.astyanax.thrift.AbstractKeyspaceOperationImpl;
 import com.netflix.astyanax.thrift.ddl.ThriftKeyspaceDefinitionImpl;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.cassandra.thrift.*;
 import org.apache.thrift.TException;
@@ -32,6 +37,9 @@ public class ThriftProxy implements Cassandra.Iface
 {
     private static Logger logger = LoggerFactory.getLogger(ThriftProxy.class);
 
+    private static final String UTF_8 = "UTF-8";
+    private static final Charset charset = Charset.forName(UTF_8);
+
     private final AstyanaxConfiguration asConfig;
     private final Keyspace client;
     private final ConnectionPool<Cassandra.Client> connectionPool;
@@ -40,7 +48,7 @@ public class ThriftProxy implements Cassandra.Iface
     private final KeyspaceTracerFactory tracerFactory;
 
     @SuppressWarnings("unchecked")
-	public ThriftProxy(AstyanaxContext<Keyspace> context) {
+    public ThriftProxy(AstyanaxContext<Keyspace> context) {
         this.asConfig = context.getAstyanaxConfiguration();
         this.client = context.getEntity();
         this.connectionPool = (ConnectionPool<Cassandra.Client>)context.getConnectionPool();
@@ -58,7 +66,7 @@ public class ThriftProxy implements Cassandra.Iface
     public void set_keyspace(String keyspace)
     throws InvalidRequestException, TException
     {
-        logger.info("set_keyspace called: " + keyspace);
+        log_result("set_keyspace", keyspace);
         if (!this.context.getKeyspaceName().equals(keyspace)) {
             throw new InvalidRequestException("Cannot operate on keyspace " + keyspace);
         }
@@ -199,7 +207,7 @@ public class ThriftProxy implements Cassandra.Iface
     public KsDef describe_keyspace(String keyspace)
     throws NotFoundException, InvalidRequestException, TException
     {
-        logger.info("describe_keyspace called: " + keyspace);
+        long start = System.nanoTime();
 
         if (!this.context.getKeyspaceName().equals(keyspace)) {
             throw new InvalidRequestException("Cannot operate on keyspace " + keyspace);
@@ -207,7 +215,9 @@ public class ThriftProxy implements Cassandra.Iface
 
         try
         {
-            return ((ThriftKeyspaceDefinitionImpl)client.describeKeyspace()).getThriftKeyspaceDefinition();
+            KsDef result = ((ThriftKeyspaceDefinitionImpl)client.describeKeyspace()).getThriftKeyspaceDefinition();
+            log_result("describe_keyspace", keyspace, start);
+            return result;
         }
         catch (ConnectionException e) {
             throw new TException("Connection error", e);
@@ -259,31 +269,56 @@ public class ThriftProxy implements Cassandra.Iface
     public CqlResult execute_cql_query(ByteBuffer query, Compression compression)
     throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, TException
     {
-        Date start = new Date();
-        
-    	final ByteBuffer q = query;
+        long start = System.nanoTime();
+
+        final ByteBuffer q = query;
         final Compression c = compression;
 
         try {
-	        OperationResult<CqlResult> result = connectionPool.executeWithFailover(
-	        		new AbstractKeyspaceOperationImpl<CqlResult>(tracerFactory.newTracer(CassandraOperationType.CQL),
-	        													 client.getKeyspaceName()) {
-			            @Override
-			            public CqlResult internalExecute(Cassandra.Client thriftClient) throws Exception {
-			                return thriftClient.execute_cql_query(q, c);
-			            }
-			        }, asConfig.getRetryPolicy()); 
+            OperationResult<CqlResult> result = connectionPool.executeWithFailover(
+                    new AbstractCqlOperationImpl<CqlResult>(tracerFactory.newTracer(CassandraOperationType.CQL),
+                                                            client.getKeyspaceName(), q) {
+                        @Override
+                        public CqlResult internalExecute(Cassandra.Client thriftClient) throws Exception {
+                            return thriftClient.execute_cql_query(q, c);
+                        }
+                    }, asConfig.getRetryPolicy());
 
-	        log_result("execute_cql_query", result, start);
-	        return result.getResult();
+            log_result("execute_cql_query", query, result, start);
+            return result.getResult();
         }
         catch (OperationException e) {
-        	throw new TException(e);
+            throw new TException(e);
         }
         catch (ConnectionException e) {
-        	throw new TException(e);        	
+            throw new TException(e);
         }
     }
+
+    private abstract static class AbstractCqlOperationImpl<R> extends AbstractKeyspaceOperationImpl<R> {
+        private ByteBuffer key = null;
+        private static Pattern re = Pattern.compile("key[ ']*(?:in *|=)[ (']*([^,)']*)", Pattern.CASE_INSENSITIVE);
+
+        public AbstractCqlOperationImpl(CassandraOperationTracer tracer, Host pinnedHost, String keyspaceName, ByteBuffer q) {
+            super(tracer, pinnedHost, keyspaceName);
+
+            String cql = charset.decode(q.duplicate()).toString();
+            Matcher m = AbstractCqlOperationImpl.re.matcher(cql);
+            if (m.find() && m.groupCount() > 0) {
+                this.key = ByteBuffer.wrap(m.group(1).getBytes(charset));
+            }
+        }
+
+        public AbstractCqlOperationImpl(CassandraOperationTracer tracer, String keyspaceName, ByteBuffer cql) {
+            this(tracer, null, keyspaceName, cql);
+        }
+
+        @Override
+        public ByteBuffer getRowKey() {
+            return key;
+        }
+    }
+
 
     public CqlPreparedResult prepare_cql_query(ByteBuffer query, Compression compression)
     throws InvalidRequestException, TException
@@ -302,8 +337,27 @@ public class ThriftProxy implements Cassandra.Iface
     {
         throw new TException("Method is not implemented: set_cql_version");
     }
-    
-    protected void log_result(String method, OperationResult<?> result, Date start) {
-    	logger.info(result.getLatency(TimeUnit.MILLISECONDS) + " ms\t" + (new Date().getTime() - start.getTime()) + " ms\t" + method);    	
+
+    protected void log_result(String method, String msg, OperationResult<?> result, long start) {
+        long queryLatency = result != null ? result.getLatency(TimeUnit.MICROSECONDS) : -1;
+        long fullLatency = start != 0 ? (System.nanoTime() - start)/1000 : -1;
+        String host = "-";
+        if (result != null) host = result.getHost().toString();
+        logger.info(host + "\t" + queryLatency + "\t" + fullLatency + " \t" + method + ": " + msg.substring(0, Math.min(msg.length(), 32)));
+    }
+
+    protected void log_result(String method, String msg) {
+        log_result(method, msg, null, 0);
+    }
+
+    protected void log_result(String method, String msg, long start) {
+        log_result(method, msg, null, start);
+    }
+
+
+    protected void log_result(String method, ByteBuffer msg, OperationResult<?> result, long start) {
+        byte[] bytearray = new byte[msg.remaining()];
+        msg.get(bytearray);
+        log_result(method, new String(bytearray), result, start);
     }
 }

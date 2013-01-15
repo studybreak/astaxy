@@ -11,15 +11,20 @@ import com.netflix.astyanax.impl.AstyanaxConfigurationImpl;
 import com.netflix.astyanax.retry.BoundedExponentialBackoff;
 import com.netflix.astyanax.thrift.ThriftFamilyFactory;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
+import java.net.URL;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.Set;
 
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.thrift.Cassandra;
 import org.apache.cassandra.thrift.CustomTHsHaServer;
 import org.apache.cassandra.thrift.TCustomNonblockingServerSocket;
@@ -35,6 +40,13 @@ import org.apache.thrift.transport.TTransportFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.yaml.snakeyaml.Loader;
+import org.yaml.snakeyaml.TypeDescription;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.Constructor;
+import org.yaml.snakeyaml.error.YAMLException;
+
+
 public class ProxyServer
 {
     private static Logger logger = LoggerFactory.getLogger(ProxyServer.class);
@@ -46,48 +58,58 @@ public class ProxyServer
 
     public static void main(String[] args)
     {
-        String clusterName = "Test Cluster";
-        String keyspaceName = "twohop";
-        String localDatacenter = "Cassandra";
-        String listenAddress = "0.0.0.0";
-        String seeds = "127.0.0.1";
-        int listenPort = 9170;
+        InputStream input = null;
+        try {
+            URL url = new URL(System.getProperty("cassandra.config"));
+            logger.info("Loading settings from " + url);
+            input = url.openStream();
+        }
+        catch (Exception e) { throw new RuntimeException(e); }
+
+        Yaml yaml = new Yaml(new Loader(new Constructor(Config.class)));
+        Config conf = (Config)yaml.load(input);
+
+        String keyspaceName = args[0];
+        String localDatacenter = (args.length >= 2 ? args[1] : null);
+
+        logger.info("Proxing for keyspace " + keyspaceName + " in local DC " +
+                    (localDatacenter != null ? localDatacenter : "null"));
 
         AstyanaxContext.Builder builder = new AstyanaxContext.Builder()
-            .forCluster(clusterName)
+            .forCluster(conf.cluster_name)
             .forKeyspace(keyspaceName)
-            .withAstyanaxConfiguration(new AstyanaxConfigurationImpl()      
+            .withAstyanaxConfiguration(new AstyanaxConfigurationImpl()
                 .setDiscoveryType(NodeDiscoveryType.TOKEN_AWARE)
                 .setConnectionPoolType(ConnectionPoolType.TOKEN_AWARE)
                 .setRetryPolicy(new BoundedExponentialBackoff(10, 100, 3))
             )
-            .withConnectionPoolConfiguration(new ConnectionPoolConfigurationImpl(clusterName)
+            .withConnectionPoolConfiguration(new ConnectionPoolConfigurationImpl(conf.cluster_name)
                 .setSocketTimeout(1000)
                 .setMaxTimeoutWhenExhausted(2000)
                 .setInitConnsPerHost(10)
                 .setMaxConnsPerHost(100)
                 .setMaxConns(1000)
                 .setLatencyAwareUpdateInterval(10000)
-                .setLatencyAwareResetInterval(10000) 
+                .setLatencyAwareResetInterval(10000)
                 .setLatencyAwareBadnessThreshold(0.50f)
                 .setLatencyAwareWindowSize(100)
-                .setSeeds(seeds)
+                .setSeeds(conf.seed_provider.parameters.get("seeds"))
                 .setLocalDatacenter(localDatacenter)
             )
             .withConnectionPoolMonitor(new CountingConnectionPoolMonitor());
 
-        AstyanaxContext<Keyspace> context = builder.buildKeyspace(ThriftFamilyFactory.getInstance()); 
+        AstyanaxContext<Keyspace> context = builder.buildKeyspace(ThriftFamilyFactory.getInstance());
         context.start();
 
         Cassandra.Iface handler = new ThriftProxy(context);
-        
+
         try {
-            InetAddress address = InetAddress.getByName(listenAddress);
-            ProxyServer proxy = new ProxyServer(address, listenPort, handler);
+            InetAddress address = InetAddress.getByName("0.0.0.0");
+            ProxyServer proxy = new ProxyServer(address, conf.rpc_port.intValue(), handler);
             proxy.start();
         }
         catch (UnknownHostException e) {
-            logger.error("Unable to find local host.", e);            
+            logger.error("Unable to find local host.", e);
         }
     }
 
@@ -174,7 +196,7 @@ public class ProxyServer
                                                                                .processor(processor);
 
             logger.info(String.format("Using custom half-sync/half-async thrift server on %s : %s", listenAddr, listenPort));
-            
+
             // Check for available processors in the system which will be equal to the IO Threads.
             thriftServer = new CustomTHsHaServer(serverArgs, executorService, Runtime.getRuntime().availableProcessors());
         }
