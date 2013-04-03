@@ -13,10 +13,15 @@ import com.netflix.astyanax.thrift.ThriftFamilyFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.CharSequence;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetEncoder;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
@@ -26,6 +31,7 @@ import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.thrift.Cassandra;
+import org.apache.cassandra.thrift.Compression;
 import org.apache.cassandra.thrift.CustomTHsHaServer;
 import org.apache.cassandra.thrift.TCustomNonblockingServerSocket;
 import org.apache.thrift.protocol.TBinaryProtocol;
@@ -103,9 +109,11 @@ public class ProxyServer
 
         Cassandra.Iface handler = new ThriftProxy(context);
 
+        new CqlTestThread(handler).start();
+
         try {
             InetAddress address = InetAddress.getByName("0.0.0.0");
-            ProxyServer proxy = new ProxyServer(address, conf.rpc_port.intValue(), handler);
+            ProxyServer proxy = new ProxyServer(address, /*conf.rpc_port.intValue()*/9170, handler);
             proxy.start();
         }
         catch (UnknownHostException e) {
@@ -149,6 +157,32 @@ public class ProxyServer
     public boolean isRunning()
     {
         return server != null;
+    }
+
+    static class CqlTestThread extends Thread
+    {
+        Cassandra.Iface handler;
+
+        static Charset charset = Charset.forName("UTF-8");
+        static CharsetEncoder encoder = charset.newEncoder();
+
+        public CqlTestThread(Cassandra.Iface handler) {
+            this.handler = handler;
+        }
+
+        public void run() {
+            while (true) {
+                try {
+                    String cql = "SELECT * FROM User WHERE key = '17800336';";
+                    ByteBuffer buf = encoder.encode(CharBuffer.wrap(cql));
+                    handler.execute_cql_query(buf, Compression.NONE);
+                    Thread.sleep(1000);
+                }
+                catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
     }
 
     private static class ThriftServerThread extends Thread
