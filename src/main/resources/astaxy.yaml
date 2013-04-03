@@ -1,0 +1,15 @@
+# Config YAML for Astaxy ring aware proxy.
+#   https://github.com/studybreak/astaxy
+#
+# Uses the same configuration directives as the cassandra.yaml.
+#   http://wiki.apache.org/cassandra/StorageConfiguration
+#
+
+cluster_name: "cluster"
+
+seed_provider:
+    - class_name: org.apache.cassandra.locator.SimpleSeedProvider
+      parameters:
+          - seeds: "127.0.0.1"
+
+rpc_port: 9160
