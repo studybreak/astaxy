@@ -288,9 +288,11 @@ public class ThriftProxy implements Cassandra.Iface
             return result.getResult();
         }
         catch (OperationException e) {
+            log_result("exception_cql_query", query);
             throw new TException(e);
         }
         catch (ConnectionException e) {
+            log_result("exception_cql_query", query);
             throw new TException(e);
         }
     }
@@ -350,14 +352,21 @@ public class ThriftProxy implements Cassandra.Iface
         log_result(method, msg, null, 0);
     }
 
+    protected void log_result(String method, ByteBuffer msg) {
+        log_result(method, byteBufToString(msg), null, 0);
+    }
+
     protected void log_result(String method, String msg, long start) {
         log_result(method, msg, null, start);
     }
 
-
     protected void log_result(String method, ByteBuffer msg, OperationResult<?> result, long start) {
-        byte[] bytearray = new byte[msg.remaining()];
-        msg.get(bytearray);
-        log_result(method, new String(bytearray), result, start);
+        log_result(method, byteBufToString(msg), result, start);
+    }
+
+    protected String byteBufToString(ByteBuffer buf) {
+        byte[] bytearray = new byte[buf.remaining()];
+        buf.get(bytearray);
+        return new String(bytearray);
     }
 }
