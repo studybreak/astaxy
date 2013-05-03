@@ -81,7 +81,6 @@ public class ProxyServer
             .withAstyanaxConfiguration(new AstyanaxConfigurationImpl()
                 .setDiscoveryType(NodeDiscoveryType.TOKEN_AWARE)
                 .setConnectionPoolType(ConnectionPoolType.TOKEN_AWARE)
-                .setRetryPolicy(new BoundedExponentialBackoff(10, 100, 3))
             )
             .withConnectionPoolConfiguration(new ConnectionPoolConfigurationImpl(conf.cluster_name)
                 .setSocketTimeout(1000)
