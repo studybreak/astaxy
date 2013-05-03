@@ -342,10 +342,11 @@ public class ThriftProxy implements Cassandra.Iface
 
     protected void log_result(String method, String msg, OperationResult<?> result, long start) {
         long queryLatency = result != null ? result.getLatency(TimeUnit.MICROSECONDS) : -1;
+        int getAttemptsCount = result != null ? result.getAttemptsCount() : -1;
         long fullLatency = start != 0 ? (System.nanoTime() - start)/1000 : -1;
         String host = "-";
         if (result != null) host = result.getHost().toString();
-        logger.info(host + "\t" + queryLatency + "\t" + fullLatency + " \t" + method + ": " + msg.substring(0, Math.min(msg.length(), 32)));
+        logger.info(host + "\t" + queryLatency + "\t" + fullLatency + " \t" + getAttemptsCount + "\t" + method + ": " + msg.substring(0, Math.min(msg.length(), 64)));
     }
 
     protected void log_result(String method, String msg) {
